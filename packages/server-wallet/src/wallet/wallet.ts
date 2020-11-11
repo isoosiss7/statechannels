@@ -686,7 +686,10 @@ export class SingleThreadedWallet extends EventEmitter<EventEmitterType>
 
     await this.store.updateFunding(channelId, BN.from(amount), assetHolderAddress);
 
-    response.channelUpdatedEvents().forEach(event => this.emit('channelUpdated', event.value));
+    response.channelUpdatedEvents().forEach(event => {
+      console.log('event emitted', event);
+      this.emit('channelUpdated', event.value);
+    });
   }
 
   async assetTransferred(arg: AssetTransferredArg): Promise<void> {
@@ -700,7 +703,7 @@ export class SingleThreadedWallet extends EventEmitter<EventEmitterType>
     );
     await this.takeActions([arg.channelId], response);
 
-    // TODO: shouldn't we be returning a response here?
+    response.channelUpdatedEvents().forEach(event => this.emit('channelUpdated', event.value));
   }
 
   private async registerChannelWithChainService(channelId: string): Promise<void> {

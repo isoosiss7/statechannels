@@ -47,7 +47,7 @@ afterAll(async () => {
   provider.polling = false;
 });
 
-it('Create a directly funded channel between two wallets ', async () => {
+it.skip('Create a directly funded channel between two wallets ', async () => {
   const participantA: Participant = {
     signingAddress: await a.getSigningAddress(),
     participantId: 'a',
@@ -112,6 +112,7 @@ it('Create a directly funded channel between two wallets ', async () => {
     status: 'opening',
     turnNum: 0,
   });
+  console.log('here1');
 
   const resultB0 = await b.pushMessage(getPayloadFor(participantB.participantId, preFundA.outbox));
 
@@ -119,6 +120,7 @@ it('Create a directly funded channel between two wallets ', async () => {
     status: 'proposed',
     turnNum: 0,
   });
+  console.log('here2');
 
   const prefundB = await b.joinChannel({channelId});
   expect(getChannelResultFor(channelId, [prefundB.channelResult])).toMatchObject({
@@ -126,6 +128,7 @@ it('Create a directly funded channel between two wallets ', async () => {
     turnNum: 1,
   });
 
+  console.log('here3');
   const resultA0 = await a.pushMessage(getPayloadFor(participantA.participantId, prefundB.outbox));
 
   expect(getChannelResultFor(channelId, resultA0.channelResults)).toMatchObject({
@@ -133,8 +136,11 @@ it('Create a directly funded channel between two wallets ', async () => {
     turnNum: 1,
   });
 
+  console.log('here4');
   const postFundA = await postFundAPromise;
+  console.log('here4a');
   const postFundB = await postFundBPromise;
+  console.log('here4b');
 
   expect(postFundA.channelResult).toMatchObject({
     channelId,
@@ -147,6 +153,7 @@ it('Create a directly funded channel between two wallets ', async () => {
     status: 'opening',
     turnNum: 1,
   });
+  console.log('here5');
 
   await b.pushMessage(getPayloadFor(participantB.participantId, postFundA.outbox));
 
@@ -161,6 +168,7 @@ it('Create a directly funded channel between two wallets ', async () => {
     status: 'running',
     turnNum: 3,
   });
+  console.log('here6');
 
   const closeA = await a.closeChannel({channelId});
   expect(closeA.channelResult).toMatchObject({
