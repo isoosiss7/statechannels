@@ -191,9 +191,9 @@ export class ChainService implements ChainServiceInterface {
       to: nitroAdjudicatorAddress,
     };
 
-    const captureExpectedErrors = (reason: any) => {
-      if (!reason.error?.message.includes('revert Channel finalized')) {
-        throw reason;
+    const captureExpectedErrors = async (reason: any) => {
+      if (reason.error?.message.includes('revert Channel finalized')) {
+        return;
       }
       throw reason;
     };
@@ -202,10 +202,7 @@ export class ChainService implements ChainServiceInterface {
     );
 
     transactionResponse
-      .then(receipt => {
-        if (receipt) return receipt.wait();
-        return;
-      })
+      .then(receipt => (receipt ? receipt.wait() : undefined))
       .catch(captureExpectedErrors);
 
     return transactionResponse;
