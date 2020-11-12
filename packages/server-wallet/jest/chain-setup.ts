@@ -5,12 +5,14 @@ import {utils} from 'ethers';
 import {deploy} from '../deployment/deploy';
 
 export default async function setup(): Promise<void> {
-  process.env['CHAIN_NETWORK_ID'] = '0x01';
-  process.env['GANACHE_HOST'] = '0.0.0.0';
-  process.env['GANACHE_PORT'] = '8545';
-  process.env[
-    'RPC_ENDPOINT'
-  ] = `http://${process.env['GANACHE_HOST']}:${process.env['GANACHE_PORT']}`;
+  if (!process.env.CHAIN_NETWORK_ID) {
+    process.env['CHAIN_NETWORK_ID'] = '0x01';
+    process.env['GANACHE_HOST'] = '0.0.0.0';
+    process.env['GANACHE_PORT'] = '8545';
+    process.env[
+      'RPC_ENDPOINT'
+    ] = `http://${process.env['GANACHE_HOST']}:${process.env['GANACHE_PORT']}`;
+  }
 
   const accounts = ETHERLIME_ACCOUNTS.map(account => ({
     ...account,
@@ -18,7 +20,8 @@ export default async function setup(): Promise<void> {
   }));
 
   if (!process.env.GANACHE_PORT) {
-    throw new Error('process.env.GANACHE_PORT must be defined');
+    console.warn('No ganache port defined, not starting ganache');
+    return;
   }
   const ganacheServer = new GanacheServer(parseInt(process.env.GANACHE_PORT), 1337, accounts);
   await ganacheServer.ready();

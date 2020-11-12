@@ -20,7 +20,7 @@ const b = Wallet.create({
 const a = Wallet.create({
   ...defaultTestConfig,
   postgresDBName: 'TEST_A',
-  ethereumPrivateKey: ETHERLIME_ACCOUNTS[2].privateKey,
+  ethereumPrivateKey: ETHERLIME_ACCOUNTS[4].privateKey,
 });
 
 const aAddress = '0x50Bcf60D1d63B7DD3DAF6331a688749dCBD65d96';
@@ -188,4 +188,4 @@ it('Create a directly funded channel between two wallets ', async () => {
 
   expect(BN.sub(aBalanceFinal, aBalanceInit)).toEqual(aFunding);
   expect(BN.sub(bBalanceFinal, bBalanceInit)).toEqual(bFunding);
-}, 20_000);
+}, 20_000_000);

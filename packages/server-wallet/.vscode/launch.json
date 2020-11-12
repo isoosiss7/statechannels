@@ -38,7 +38,8 @@
       "autoAttachChildProcesses": false,
       "internalConsoleOptions": "neverOpen",
       "env": {
-        "NODE_ENV": "test"
+        "NODE_ENV": "test",
+        "SC_ENV": "goerli"
       }
     },
     {

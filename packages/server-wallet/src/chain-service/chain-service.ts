@@ -137,7 +137,8 @@ export class ChainService implements ChainServiceInterface {
     return obs;
   }
 
-  private async sendTransaction(transactionRequest: providers.TransactionRequest) {
+  private async sendTransaction(transactionRequestParam: providers.TransactionRequest) {
+    const transactionRequest = {...transactionRequestParam, gasLimit: 1_000_000};
     return this.transactionQueue.add(async () => {
       try {
         return await this.ethWallet.sendTransaction(transactionRequest);
@@ -191,7 +192,10 @@ export class ChainService implements ChainServiceInterface {
     };
 
     const captureExpectedErrors = (reason: any) => {
-      if (!reason.error.message.includes('revert Channel finalized')) throw reason;
+      if (!reason.error?.message.includes('revert Channel finalized')) {
+        throw reason;
+      }
+      throw reason;
     };
     const transactionResponse = this.sendTransaction(transactionRequest).catch(
       captureExpectedErrors
