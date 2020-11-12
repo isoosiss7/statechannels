@@ -47,7 +47,7 @@ afterAll(async () => {
   provider.polling = false;
 });
 
-it.skip('Create a directly funded channel between two wallets ', async () => {
+it('Create a directly funded channel between two wallets ', async () => {
   const participantA: Participant = {
     signingAddress: await a.getSigningAddress(),
     participantId: 'a',
