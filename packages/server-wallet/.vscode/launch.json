@@ -39,7 +39,7 @@
       "internalConsoleOptions": "neverOpen",
       "env": {
         "NODE_ENV": "test",
-        "SC_ENV": "goerli"
+        "SC_ENV": "rinkeby"
       }
     },
     {

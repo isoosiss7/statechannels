@@ -10,7 +10,7 @@ export let testKnex: Knex;
 
 beforeAll(async () => {
   testKnex = Knex(extractDBConfigFromServerWalletConfig(defaultConfig));
-  await new DBAdmin(testKnex).truncateDB();
+  // await new DBAdmin(testKnex).truncateDB();
 });
 
 afterAll(async () => {

@@ -1,5 +1,4 @@
 import {CreateChannelParams, Participant, Allocation} from '@statechannels/client-api-schema';
-import {ETHERLIME_ACCOUNTS} from '@statechannels/devtools';
 import {BN, makeDestination} from '@statechannels/wallet-core';
 import {BigNumber, constants, ethers, providers} from 'ethers';
 import {fromEvent} from 'rxjs';
@@ -15,12 +14,12 @@ let provider: providers.JsonRpcProvider;
 const b = Wallet.create({
   ...defaultTestConfig,
   postgresDBName: 'TEST_B',
-  ethereumPrivateKey: ETHERLIME_ACCOUNTS[1].privateKey,
+  ethereumPrivateKey: '0x198d2bda72376767d995d6903823c42a1edbd4e661ce4e485acd18cf1e33a908',
 });
 const a = Wallet.create({
   ...defaultTestConfig,
   postgresDBName: 'TEST_A',
-  ethereumPrivateKey: ETHERLIME_ACCOUNTS[4].privateKey,
+  ethereumPrivateKey: '0x99f4d3c26c04c1cf2b47355dfd29d226e4436e8bc36d0c96195f1c2f92cfceca',
 });
 
 const aAddress = '0x50Bcf60D1d63B7DD3DAF6331a688749dCBD65d96';
