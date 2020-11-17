@@ -1,4 +1,5 @@
-const {GanacheDeployer} = require('@statechannels/devtools');
+const {GanacheDeployer, ETHERLIME_ACCOUNTS} = require('@statechannels/devtools');
+const {Wallet} = require('ethers');
 
 const countingAppArtifact = require('../build/contracts/CountingApp.json');
 const erc20AssetHolderArtifact = require('../build/contracts/TestErc20AssetHolder.json');
@@ -35,7 +36,11 @@ const deploy = async () => {
 
   // for test purposes in this package, wire up the assetholders with the testNitroAdjudicator
 
-  const TEST_TOKEN_ADDRESS = await deployer.deploy(tokenArtifact, {}, 0);
+  const TEST_TOKEN_ADDRESS = await deployer.deploy(
+    tokenArtifact,
+    {},
+    new Wallet(ETHERLIME_ACCOUNTS[0].privateKey).address
+  );
   const TEST_ETH_ASSET_HOLDER_ADDRESS = await deployer.deploy(
     ethAssetHolderArtifact,
     {},
