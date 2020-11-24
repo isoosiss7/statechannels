@@ -553,11 +553,17 @@ export class Store {
     syncTimer('validating invariants', () => validateInvariants(channel.vars, channel.myAddress));
 
     // Insert into the DB
-    return await asyncTimer('updating', () =>
+    await asyncTimer('updating', () =>
       Channel.query(tx)
         .where({channelId: channel.channelId})
         .patch({vars: channel.vars})
-        .returning('*')
+        .first()
+    );
+
+    return await asyncTimer('querying', () =>
+      Channel.query(tx)
+        .where({'channels.channel_id': channel.channelId})
+        .withGraphJoined('funding')
         .first()
     );
   }

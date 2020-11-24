@@ -191,7 +191,7 @@ it('Create a directly funded channel between two wallets ', async () => {
     turnNum: 3,
     // TODO: the fundingStatus is incorrect as the funding table is not joined with channels table
     //  when processing the pushMessage above
-    // fundingStatus: 'Funded',
+    fundingStatus: 'Funded',
   });
 
   const closeA = await a.closeChannel({channelId});
