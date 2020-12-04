@@ -13,5 +13,6 @@
     "resolveJsonModule": true
   },
   "include": ["src/**/*", "test/**/*", "artifacts/**/*.json"],
+  "exclude": ["lib", "node_modules"],
   "references": [{"path": "../jest-gas-reporter"}]
 }
