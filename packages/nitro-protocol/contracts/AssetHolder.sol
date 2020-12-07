@@ -58,20 +58,20 @@ contract AssetHolder is IAssetHolder {
      * @param guarantorChannelId Unique identifier for a guarantor state channel.
      * @param guaranteeBytes The abi.encode of Outcome.Guarantee
      * @param allocationBytes The abi.encode of AssetOutcome.Allocation for the __target__
-     * @param destination External destination or channel to transfer funds *to*.
+     * @param indices Array with each entry denoting the index of a destination (in the target channel) to transfer funds to. Should be in increasing order.
      */
     function claim(
         bytes32 guarantorChannelId,
         bytes calldata guaranteeBytes,
         bytes calldata allocationBytes,
-        bytes32 destination
+        uint256[] memory indices
     ) external {
         // checks
         _requireCorrectGuaranteeHash(guarantorChannelId, guaranteeBytes);
         Outcome.Guarantee memory guarantee = abi.decode(guaranteeBytes, (Outcome.Guarantee));
         _requireCorrectAllocationHash(guarantee.targetChannelId, allocationBytes);
         // effects and interactions
-        _claim(guarantorChannelId, guarantee, allocationBytes, destination);
+        _claim(guarantorChannelId, guarantee, allocationBytes, indices);
     }
 
     /**
@@ -139,20 +139,53 @@ contract AssetHolder is IAssetHolder {
     // Internal methods
     // **************
 
-    function _computeReorderedAllocation(
+    function _computeNewAllocationWithGuarantee(
+        uint256 initialHoldings,
         Outcome.AllocationItem[] memory allocation,
+        uint256[] memory indices,
         Outcome.Guarantee memory guarantee
-    ) internal pure returns (Outcome.AllocationItem[] memory reorderedAllocation) {
-        reorderedAllocation = new Outcome.AllocationItem[](allocation.length);
-        uint256 k = 0; // indexes reorderedAllocation;
+)       internal
+        pure
+        returns (
+            Outcome.AllocationItem[] memory newAllocation,
+            bool safeToDelete,
+            uint256[] memory payouts,
+            uint256 totalPayouts
+        )
+         {
+        payouts = new uint256[](indices.length > 0 ? indices.length : allocation.length); // [] means "all"; values default to 0
+        totalPayouts = 0;
+        newAllocation = new Outcome.AllocationItem[](allocation.length);
+        safeToDelete = true; // switched to false if there is an item with amount > 0
+        uint256 surplus = initialHoldings; // virtual funds available during calculation
+        uint256 k = 0; // indexes indices
+
         for (uint256 j = 0; j < guarantee.destinations.length; j++) {
-            // for each destination in the guarantee
+            // loop over allocations and decrease surplus
             for (uint256 i = 0; i < allocation.length; i++) {
-                // find the first occurence in the allocation
-                if (allocation[i].destination == guarantee.destinations[i]) {
-                    reorderedAllocation[k].destination = allocation[i].destination;
-                    reorderedAllocation[k].amount = allocation[i].amount;
-                    k++;
+                // copy destination part
+                newAllocation[i].destination = allocation[i].destination;
+                if (allocation[i].destination == guarantee.destinations[j]) {
+                    // compute new amount part
+                    uint256 affordsForDestination = (allocation[i].amount > surplus)
+                        ? surplus
+                        : allocation[i].amount; // min(amount,surplus)
+                    if ((indices.length == 0) || ((k < indices.length) && (indices[k] == i))) {
+                        // found a match
+                        // reduce the current allocationItem.amount
+                        newAllocation[i].amount = allocation[i].amount - affordsForDestination;
+                        // increase the relevant payout
+                        payouts[k] = affordsForDestination;
+                        totalPayouts += affordsForDestination;
+                        // move on to the next supplied index
+                        ++k;
+                    } else {
+                        newAllocation[i].amount = allocation[i].amount;
+                    }
+                    if (newAllocation[i].amount != 0) safeToDelete = false;
+                    // decrease surplus by the current amount if possible, else surplus goes to zero
+                    surplus -= affordsForDestination;
+                    // break; // optional
                 }
             }
         }
@@ -280,7 +313,7 @@ contract AssetHolder is IAssetHolder {
      * @param guarantorChannelId Unique identifier for a guarantor state channel.
      * @param guarantee The guarantee
      * @param allocationBytes The abi.encode of AssetOutcome.Allocation for the __target__
-     * @param destination External destination or channel to transfer funds *to*.
+     * @param indices Array with each entry denoting the index of a destination (in the target channel) to transfer funds to.
      */
     function _claim(
         bytes32 guarantorChannelId,
@@ -293,21 +326,51 @@ contract AssetHolder is IAssetHolder {
             (Outcome.AllocationItem[])
         );
         uint256 initialHoldings = holdings[guarantorChannelId];
-        Outcome.AllocationItem[] memory reorderedAllocation = _computeReorderedOutcome(allocation, guarantee);
 
-        _computeNewAllocation(initialHoldings,_computeReorderedOutcome(allocation, guarantee),indices);
+        (
+            Outcome.AllocationItem[] memory newAllocation,
+            bool safeToDelete,
+            uint256[] memory payouts,
+            uint256 totalPayouts
+        ) =_computeNewAllocationWithGuarantee(initialHoldings, allocation, indices, guarantee);
+
         // effects
-        holdings[guarantorChannelId] -= affordsForDestination;
+        uint256 newHoldings = initialHoldings.sub(totalPayouts);
 
-
-        // storage updated BEFORE external contracts called (prevent reentrancy attacks)
-        if (_isExternalDestination(destination)) {
-            _transferAsset(_bytes32ToAddress(destination), affordsForDestination);
+        if (newHoldings == 0) {
+            delete holdings[guarantorChannelId];
         } else {
-            holdings[destination] += affordsForDestination;
+            holdings[guarantorChannelId] = newHoldings;
         }
-        // Event emitted
-        emit AssetTransferred(guarantorChannelId, destination, affordsForDestination);
+
+        if (safeToDelete) {
+            delete assetOutcomeHashes[guarantorChannelId];
+            delete assetOutcomeHashes[guarantee.targetChannelId];
+        } else {
+            assetOutcomeHashes[guarantorChannelId] = keccak256(
+                abi.encode(
+                    Outcome.AssetOutcome(
+                        uint8(Outcome.AssetOutcomeType.Allocation),
+                        abi.encode(newAllocation)
+                    )
+                )
+            );
+        }
+
+        for (uint256 j = 0; j < payouts.length; j++) {
+            if (payouts[j] > 0) {
+                bytes32 destination = allocation[indices.length > 0 ? indices[j] : j].destination;
+                // storage updated BEFORE external contracts called (prevent reentrancy attacks)
+                if (_isExternalDestination(destination)) {
+                    _transferAsset(_bytes32ToAddress(destination), payouts[j]);
+                } else {
+                    holdings[destination] += payouts[j];
+                }
+                // Event emitted
+                emit AssetTransferred(guarantorChannelId, destination, payouts[j]);
+            }
+        }
+
     }
 
     /**
