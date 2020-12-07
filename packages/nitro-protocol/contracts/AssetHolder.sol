@@ -91,7 +91,7 @@ contract AssetHolder is IAssetHolder {
         Outcome.Guarantee memory guarantee = abi.decode(guaranteeBytes, (Outcome.Guarantee));
         _requireCorrectAllocationHash(guarantee.targetChannelId, allocationBytes);
         // effects and interactions
-        _claimAll(guarantorChannelId, guarantee, allocationBytes);
+        _claim(guarantorChannelId, guarantee, allocationBytes, new uint256[](0));
     }
 
     // **************
@@ -144,7 +144,8 @@ contract AssetHolder is IAssetHolder {
         Outcome.AllocationItem[] memory allocation,
         uint256[] memory indices,
         Outcome.Guarantee memory guarantee
-)       internal
+    )
+        internal
         pure
         returns (
             Outcome.AllocationItem[] memory newAllocation,
@@ -152,7 +153,7 @@ contract AssetHolder is IAssetHolder {
             uint256[] memory payouts,
             uint256 totalPayouts
         )
-         {
+    {
         payouts = new uint256[](indices.length > 0 ? indices.length : allocation.length); // [] means "all"; values default to 0
         totalPayouts = 0;
         newAllocation = new Outcome.AllocationItem[](allocation.length);
@@ -332,7 +333,7 @@ contract AssetHolder is IAssetHolder {
             bool safeToDelete,
             uint256[] memory payouts,
             uint256 totalPayouts
-        ) =_computeNewAllocationWithGuarantee(initialHoldings, allocation, indices, guarantee);
+        ) = _computeNewAllocationWithGuarantee(initialHoldings, allocation, indices, guarantee);
 
         // effects
         uint256 newHoldings = initialHoldings.sub(totalPayouts);
@@ -368,132 +369,6 @@ contract AssetHolder is IAssetHolder {
                 }
                 // Event emitted
                 emit AssetTransferred(guarantorChannelId, destination, payouts[j]);
-            }
-        }
-
-    }
-
-    /**
-     * @notice Transfers the funds escrowed against `guarantorChannelId` to the beneficiaries of the __target__ of that channel. Does not check allocationBytes or guarantee against on chain storage.
-     * @dev Transfers the funds escrowed against `guarantorChannelId` to the beneficiaries of the __target__ of that channel. Does not check allocationBytes or guarantee against on chain storage.
-     * @param guarantorChannelId Unique identifier for a guarantor state channel.
-     * @param guarantee The guarantee
-     * @param allocationBytes The abi.encode of AssetOutcome.Allocation for the __target__
-     */
-    function _claimAll(
-        bytes32 guarantorChannelId,
-        Outcome.Guarantee memory guarantee,
-        bytes memory allocationBytes
-    ) internal {
-        uint256 balance = holdings[guarantorChannelId];
-
-        Outcome.AllocationItem[] memory allocation = abi.decode(
-            allocationBytes,
-            (Outcome.AllocationItem[])
-        ); // this remains constant length
-
-        uint256[] memory payouts = new uint256[](allocation.length);
-        uint256 newAllocationLength = allocation.length;
-
-        // first increase payouts according to guarantee
-        for (uint256 i = 0; i < guarantee.destinations.length; i++) {
-            if (balance == 0) {
-                break;
-            }
-            // for each destination in the guarantee
-            bytes32 _destination = guarantee.destinations[i];
-            for (uint256 j = 0; j < allocation.length; j++) {
-                if (balance == 0) {
-                    break;
-                }
-                if (_destination == allocation[j].destination) {
-                    // find amount allocated to that destination (if it exists in channel alllocation)
-                    uint256 _amount = allocation[j].amount;
-                    if (_amount > 0) {
-                        if (balance >= _amount) {
-                            balance = balance.sub(_amount);
-                            allocation[j].amount = 0; // subtract _amount;
-                            newAllocationLength = newAllocationLength.sub(1);
-                            payouts[j] += _amount;
-                            break;
-                        } else {
-                            allocation[j].amount = _amount.sub(balance);
-                            payouts[j] += balance;
-                            balance = 0;
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-
-        // next, increase payouts according to original allocation order
-        // this block only has an effect if balance > 0
-        for (uint256 j = 0; j < allocation.length; j++) {
-            // for each entry in the target channel's outcome
-            if (balance == 0) {
-                break;
-            }
-            uint256 _amount = allocation[j].amount;
-            if (_amount > 0) {
-                if (balance >= _amount) {
-                    balance = balance.sub(_amount);
-                    allocation[j].amount = 0; // subtract _amount;
-                    newAllocationLength = newAllocationLength.sub(1);
-                    payouts[j] += _amount;
-                } else {
-                    allocation[j].amount = _amount.sub(balance);
-                    payouts[j] += balance;
-                    balance = 0;
-                }
-            }
-        }
-
-        // EFFECTS
-        holdings[guarantorChannelId] = balance;
-
-        // at this point have payouts array of uint256s, each corresponding to original destinations
-        // and allocations has some zero amounts which we want to prune
-        Outcome.AllocationItem[] memory newAllocation;
-        if (newAllocationLength > 0) {
-            newAllocation = new Outcome.AllocationItem[](newAllocationLength);
-        }
-
-        uint256 k = 0;
-        for (uint256 j = 0; j < allocation.length; j++) {
-            // for each destination in the target channel's allocation
-            if (allocation[j].amount > 0) {
-                newAllocation[k] = allocation[j];
-                k++;
-            }
-        }
-        assert(k == newAllocationLength);
-
-        if (newAllocationLength > 0) {
-            // store hash
-            assetOutcomeHashes[guarantee.targetChannelId] = keccak256(
-                abi.encode(
-                    Outcome.AssetOutcome(
-                        uint8(Outcome.AssetOutcomeType.Allocation),
-                        abi.encode(newAllocation)
-                    )
-                )
-            );
-        } else {
-            delete assetOutcomeHashes[guarantorChannelId];
-            delete assetOutcomeHashes[guarantee.targetChannelId];
-        }
-
-        // INTERACTIONS
-        for (uint256 j = 0; j < allocation.length; j++) {
-            // for each destination in the target channel's allocation
-            if (payouts[j] > 0) {
-                if (_isExternalDestination(allocation[j].destination)) {
-                    _transferAsset(_bytes32ToAddress(allocation[j].destination), payouts[j]);
-                } else {
-                    holdings[allocation[j].destination] += payouts[j];
-                }
-                emit AssetTransferred(guarantorChannelId, allocation[j].destination, payouts[j]);
             }
         }
     }
