@@ -161,33 +161,43 @@ contract AssetHolder is IAssetHolder {
         uint256 surplus = initialHoldings; // virtual funds available during calculation
         uint256 k = 0; // indexes indices
 
+        // copy allocation
+        for (uint256 i = 0; i < allocation.length; i++) {
+            newAllocation[i].destination = allocation[i].destination;
+            newAllocation[i].amount = allocation[i].amount;
+        }
+
+        // for each guarantee destination
         for (uint256 j = 0; j < guarantee.destinations.length; j++) {
-            // loop over allocations and decrease surplus
-            for (uint256 i = 0; i < allocation.length; i++) {
-                // copy destination part
-                newAllocation[i].destination = allocation[i].destination;
-                if (allocation[i].destination == guarantee.destinations[j]) {
-                    // compute new amount part
-                    uint256 affordsForDestination = (allocation[i].amount > surplus)
+            for (uint256 i = 0; i < newAllocation.length; i++) {
+                // search for it in the allocation
+                if (guarantee.destinations[j] == newAllocation[i].destination) {
+                    // if we find it, compute new amount
+                    uint256 affordsForDestination = (newAllocation[i].amount > surplus)
                         ? surplus
-                        : allocation[i].amount; // min(amount,surplus)
+                        : newAllocation[i].amount; // min(amount,surplus)
                     if ((indices.length == 0) || ((k < indices.length) && (indices[k] == i))) {
-                        // found a match
+                        // only if specified in supplied indices, or we if we are doing "all"
                         // reduce the current allocationItem.amount
-                        newAllocation[i].amount = allocation[i].amount - affordsForDestination;
+                        newAllocation[i].amount -= affordsForDestination;
                         // increase the relevant payout
                         payouts[k] = affordsForDestination;
                         totalPayouts += affordsForDestination;
                         // move on to the next supplied index
                         ++k;
-                    } else {
-                        newAllocation[i].amount = allocation[i].amount;
                     }
-                    if (newAllocation[i].amount != 0) safeToDelete = false;
-                    // decrease surplus by the current amount if possible, else surplus goes to zero
+                    // decrease surplus by the current amount regardless of hitting a specified index
                     surplus -= affordsForDestination;
-                    // break; // optional
+                    if (surplus == 0) break;
                 }
+                if (surplus == 0) break;
+            }
+        }
+
+        for (uint256 i = 0; i < allocation.length; i++) {
+            if (newAllocation[i].amount != 0) {
+                safeToDelete = false;
+                break;
             }
         }
     }
