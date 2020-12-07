@@ -5,8 +5,8 @@
   "author": "statechannels",
   "bugs": "https://github.com/statechannels/statechannels/issues",
   "dependencies": {
-    "@docusaurus/core": "2.0.0-alpha.64",
-    "@docusaurus/preset-classic": "2.0.0-alpha.64",
+    "@docusaurus/core": "2.0.0-alpha.69",
+    "@docusaurus/preset-classic": "2.0.0-alpha.69",
     "@mdx-js/react": "1.6.18",
     "@microsoft/api-documenter": "7.8.21",
     "@statechannels/nitro-protocol": "0.11.2",
