@@ -305,8 +305,6 @@ contract AssetHolder is IAssetHolder {
                 } else {
                     holdings[destination] += payouts[j];
                 }
-                // Event emitted
-                emit AssetTransferred(fromChannelId, destination, payouts[j]);
             }
         }
         emit AllocationUpdated(fromChannelId, initialHoldings);
