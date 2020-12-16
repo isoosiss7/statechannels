@@ -1,5 +1,6 @@
 import {Contract, providers, Signature} from 'ethers';
 
+import {Outcome} from './contract/outcome';
 import {Uint256} from './contract/types';
 import {State} from './contract/state';
 import * as forceMoveTrans from './contract/transaction-creators/force-move';
@@ -84,6 +85,16 @@ export function createConcludeTransaction(
   const {states, signatures, whoSignedWhat} = createSignatureArguments(conclusionProof);
   return forceMoveTrans.createConcludeTransaction(states, signatures, whoSignedWhat);
 }
+
+export const createPushOutcomeTransaction: (
+  arg: nitroAdjudicatorTrans.PushOutcomeTransactionArg
+) => providers.TransactionRequest = nitroAdjudicatorTrans.createPushOutcomeTransactionFactory(
+  false
+);
+
+export const createPushOutcomeAndTransferAllTransaction: (
+  arg: nitroAdjudicatorTrans.PushOutcomeTransactionArg
+) => providers.TransactionRequest = nitroAdjudicatorTrans.createPushOutcomeTransactionFactory(true);
 
 // Currently we assume each signedState is a unique combination of state/signature
 // So if multiple participants sign a state we expect a SignedState for each participant

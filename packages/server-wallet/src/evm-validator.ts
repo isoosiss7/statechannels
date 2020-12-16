@@ -12,19 +12,12 @@ const logger = createLogger(defaultTestConfig());
  * Returns a promise that resolves to true if the validateTransition
  * returns true false otherwise
  */
-export const validateTransitionWithEVM = (
+export const validateAppTransitionWithEVM = (
   from: NitroState,
   to: NitroState,
-  bytecode: Bytes
-): boolean | undefined => {
-  if (from.appDefinition !== to.appDefinition) {
-    logger.error('Invalid transition', {
-      error: new Error('States are using different appDefinitions'),
-    });
-    return false;
-  }
-
-  if (bytecode === '0x') return false;
+  bytecode?: Bytes
+): boolean => {
+  if (bytecode === '0x' || bytecode == undefined) return false;
 
   const {data} = createValidTransitionTransaction(from, to);
 

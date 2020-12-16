@@ -9,7 +9,7 @@ import {take} from 'rxjs/operators';
 
 import {defaultTestConfig, overwriteConfigWithDatabaseConnection} from '../config';
 import {Wallet, SingleChannelOutput} from '../wallet';
-import {getChannelResultFor, getPayloadFor} from '../__test__/test-helpers';
+import {getChannelResultFor, getPayloadFor, ONE_DAY} from '../__test__/test-helpers';
 
 // eslint-disable-next-line no-process-env, @typescript-eslint/no-non-null-assertion
 const ethAssetHolderAddress = makeAddress(process.env.ETH_ASSET_HOLDER_ADDRESS!);
@@ -124,6 +124,7 @@ it('Create a directly funded channel between two wallets ', async () => {
     appDefinition: ethers.constants.AddressZero,
     appData: constants.HashZero,
     fundingStrategy: 'Direct',
+    challengeDuration: ONE_DAY,
   };
 
   // the type assertion is due to
@@ -136,7 +137,7 @@ it('Create a directly funded channel between two wallets ', async () => {
     .pipe(take(2))
     .toPromise();
 
-  const assetTransferredAPromise = fromEvent<SingleChannelOutput>(a as any, 'channelUpdated')
+  const channelClosedAPromise = fromEvent<SingleChannelOutput>(a as any, 'channelUpdated')
     .pipe(take(3))
     .toPromise();
 
@@ -246,9 +247,10 @@ it('Create a directly funded channel between two wallets ', async () => {
   });
 
   await mineBlocks(2);
-  const assetTransferredA = await assetTransferredAPromise;
 
-  expect(assetTransferredA.channelResult).toMatchObject({
+  const channelClosedA = await channelClosedAPromise;
+
+  expect(channelClosedA.channelResult).toMatchObject({
     status: 'closed',
     turnNum: 4,
     fundingStatus: 'Defunded',

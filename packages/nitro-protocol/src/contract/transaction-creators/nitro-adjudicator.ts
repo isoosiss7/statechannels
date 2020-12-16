@@ -8,24 +8,31 @@ import {getFixedPart, hashAppPart, hashState, State} from '../state';
 // https://github.com/ethers-io/ethers.js/issues/602#issuecomment-574671078
 const NitroAdjudicatorContractInterface = new utils.Interface(NitroAdjudicatorArtifact.abi);
 
-export function createPushOutcomeTransaction(
-  turnNumRecord: number,
-  finalizesAt: number,
-  state: State,
-  outcome: Outcome,
-  channelWasConcluded = false
-): providers.TransactionRequest {
+export type PushOutcomeTransactionArg = {
+  turnNumRecord: number;
+  finalizesAt: number;
+  state: State;
+  outcome: Outcome;
+  channelWasConcluded?: boolean;
+  challengerAddress?: string;
+};
+
+export const createPushOutcomeTransactionFactory = (transferAll: boolean) => (
+  arg: PushOutcomeTransactionArg
+): providers.TransactionRequest => {
+  const defaults = {channelWasConcluded: false, challengerAddress: constants.AddressZero};
+  const {turnNumRecord, finalizesAt, state, outcome, channelWasConcluded, challengerAddress} = {
+    ...defaults,
+    ...arg,
+  };
   if (channelWasConcluded && turnNumRecord !== 0)
     throw Error('If the channel was concluded, you should use 0 for turnNumRecord');
   const channelId = getChannelId(state.channel);
   const stateHash = channelWasConcluded ? constants.HashZero : hashState(state);
-  const {participants} = state.channel;
-  const challengerAddress = channelWasConcluded
-    ? constants.AddressZero
-    : participants[state.turnNum % participants.length];
   const encodedOutcome = encodeOutcome(outcome);
 
-  const data = NitroAdjudicatorContractInterface.encodeFunctionData('pushOutcome', [
+  const funcName = transferAll ? 'pushOutcomeAndTransferAll' : 'pushOutcome';
+  const data = NitroAdjudicatorContractInterface.encodeFunctionData(funcName, [
     channelId,
     turnNumRecord,
     finalizesAt,
@@ -35,7 +42,7 @@ export function createPushOutcomeTransaction(
   ]);
 
   return {data};
-}
+};
 
 export function concludePushOutcomeAndTransferAllArgs(
   states: State[],

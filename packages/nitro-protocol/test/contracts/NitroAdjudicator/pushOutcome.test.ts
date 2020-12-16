@@ -5,14 +5,13 @@ import ERC20AssetHolderArtifact from '../../../artifacts/contracts/test/TestErc2
 import ETHAssetHolderArtifact from '../../../artifacts/contracts/test/TestEthAssetHolder.sol/TestEthAssetHolder.json';
 import NitroAdjudicatorArtifact from '../../../artifacts/contracts/test/TESTNitroAdjudicator.sol/TESTNitroAdjudicator.json';
 import {Channel, getChannelId} from '../../../src/contract/channel';
-import {hashAssetOutcome, MAX_OUTCOME_ITEMS} from '../../../src/contract/outcome';
+import {hashAssetOutcome} from '../../../src/contract/outcome';
 import {State} from '../../../src/contract/state';
-import {createPushOutcomeTransaction} from '../../../src/contract/transaction-creators/nitro-adjudicator';
 import {
   CHANNEL_NOT_FINALIZED,
   WRONG_CHANNEL_STORAGE,
 } from '../../../src/contract/transaction-creators/revert-reasons';
-import {NITRO_MAX_GAS} from '../../../src/transactions';
+import {createPushOutcomeTransaction, NITRO_MAX_GAS} from '../../../src/transactions';
 import {
   finalizedOutcomeHash,
   getRandomNonce,
@@ -21,6 +20,7 @@ import {
   sendTransaction,
   setupContracts,
 } from '../../test-helpers';
+import {PushOutcomeTransactionArg} from '../../../src/contract/transaction-creators/nitro-adjudicator';
 
 const provider = getTestProvider();
 let TestNitroAdjudicator: Contract;
@@ -144,13 +144,19 @@ describe('pushOutcome', () => {
       expect(await TestNitroAdjudicator.channelStorageHashes(channelId)).toEqual(
         initialChannelStorageHash
       );
-      const transactionRequest = createPushOutcomeTransaction(
-        wasConcluded ? 0 : declaredTurnNumRecord,
+
+      let arg: PushOutcomeTransactionArg = {
+        turnNumRecord: wasConcluded ? 0 : declaredTurnNumRecord,
         finalizesAt,
         state,
         outcome,
-        wasConcluded
-      );
+        channelWasConcluded: wasConcluded,
+      };
+      if (!wasConcluded) {
+        arg = {...arg, challengerAddress: participants[state.turnNum % participants.length]};
+      }
+
+      const transactionRequest = createPushOutcomeTransaction(arg);
 
       if (outcomeHashExits) {
         await sendTransaction(provider, TestNitroAdjudicator.address, transactionRequest);

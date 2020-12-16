@@ -2,6 +2,7 @@ import {
   ContractArtifacts,
   createERC20DepositTransaction,
   createETHDepositTransaction,
+  getChallengeRegisteredEvent,
   getChannelId,
   Transactions,
 } from '@statechannels/nitro-protocol';
@@ -9,16 +10,19 @@ import {
   Address,
   BN,
   makeAddress,
-  makeDestination,
+  PrivateKey,
   SignedState,
+  State,
   toNitroSignedState,
+  toNitroState,
 } from '@statechannels/wallet-core';
 import {constants, Contract, ContractInterface, Event, providers, Wallet} from 'ethers';
-import {concat, from, Observable, Subscription} from 'rxjs';
-import {filter, share} from 'rxjs/operators';
+import {Observable} from 'rxjs';
 import {NonceManager} from '@ethersproject/experimental';
 import PQueue from 'p-queue';
 import {Logger} from 'pino';
+import _ from 'lodash';
+import {computeNewAssetOutcome} from '@statechannels/nitro-protocol/lib/src/contract/asset-holder';
 
 import {Bytes32} from '../type-aliases';
 import {createLogger} from '../logger';
@@ -26,7 +30,7 @@ import {defaultTestConfig} from '../config';
 
 import {
   AllowanceMode,
-  AssetTransferredArg,
+  AssetOutcomeUpdatedArg,
   ChainEventSubscriberInterface,
   ChainServiceArgs,
   ChainServiceInterface,
@@ -35,20 +39,24 @@ import {
 } from './types';
 
 const Deposited = 'Deposited' as const;
-const AssetTransferred = 'AssetTransferred' as const;
-type DepositedEvent = {type: 'Deposited'; ethersEvent?: Event} & HoldingUpdatedArg;
-type AssetTransferredEvent = {type: 'AssetTransferred'; ethersEvent: Event} & AssetTransferredArg;
-type ContractEvent = DepositedEvent | AssetTransferredEvent;
+const AllocationUpdated = 'AllocationUpdated';
+const ChallengeRegistered = 'ChallengeRegistered' as const;
+type DepositedEvent = {type: 'Deposited'; ethersEvent: Event} & HoldingUpdatedArg;
+type AllocationUpdatedEvent = {
+  type: 'AllocationUpdated';
+  ethersEvent: Event;
+} & AssetOutcomeUpdatedArg;
+type AssetHolderEvent = DepositedEvent | AllocationUpdatedEvent;
 
 // TODO: is it reasonable to assume that the ethAssetHolder address is defined as runtime configuration?
-/* eslint-disable no-process-env, @typescript-eslint/no-non-null-assertion */
+/* eslint-disable no-process-env, */
 const ethAssetHolderAddress = makeAddress(
   process.env.ETH_ASSET_HOLDER_ADDRESS || constants.AddressZero
 );
 const nitroAdjudicatorAddress = makeAddress(
-  process.env.NITRO_ADJUDICATOR_ADDRESS! || constants.AddressZero
+  process.env.NITRO_ADJUDICATOR_ADDRESS || constants.AddressZero
 );
-/* eslint-enable no-process-env, @typescript-eslint/no-non-null-assertion */
+/* eslint-enable no-process-env */
 
 function isEthAssetHolder(address: Address): boolean {
   return address === ethAssetHolderAddress;
@@ -59,13 +67,16 @@ export class ChainService implements ChainServiceInterface {
   private readonly ethWallet: NonceManager;
   private provider: providers.JsonRpcProvider;
   private allowanceMode: AllowanceMode;
-  private addressToObservable: Map<Address, Observable<ContractEvent>> = new Map();
+  private assetHolderToObservable: Map<Address, Observable<AssetHolderEvent>> = new Map();
   private addressToContract: Map<Address, Contract> = new Map();
-  private channelToSubscription: Map<Bytes32, Subscription[]> = new Map();
+  private channelToSubscribers: Map<Bytes32, ChainEventSubscriberInterface[]> = new Map();
+  // For convinience, can also use addressToContract map
   private nitroAdjudicator: Contract;
 
   private readonly blockConfirmations: number;
   private transactionQueue = new PQueue({concurrency: 1});
+
+  private finalizingChannels: {finalizesAtS: number; channelId: Bytes32}[] = [];
 
   constructor({
     provider,
@@ -76,28 +87,37 @@ export class ChainService implements ChainServiceInterface {
     allowanceMode,
   }: Partial<ChainServiceArgs>) {
     if (!pk) throw new Error('ChainService: Private key not provided');
-    this.ethWallet = new NonceManager(new Wallet(pk, new providers.JsonRpcProvider(provider)));
+    this.provider = new providers.JsonRpcProvider(provider);
+    this.ethWallet = new NonceManager(new Wallet(pk, this.provider));
     this.blockConfirmations = blockConfirmations ?? 5;
     this.logger = logger
       ? logger.child({module: 'ChainService'})
       : createLogger(defaultTestConfig());
-    this.provider = new providers.JsonRpcProvider(provider);
+
     this.allowanceMode = allowanceMode || 'MaxUint';
     if (provider && (provider.includes('0.0.0.0') || provider.includes('localhost'))) {
       pollingInterval = pollingInterval ?? 50;
     }
     if (pollingInterval) this.provider.pollingInterval = pollingInterval;
-    this.nitroAdjudicator = new Contract(
+
+    this.nitroAdjudicator = this.getOrAddContractMapping(
       nitroAdjudicatorAddress,
-      ContractArtifacts.NitroAdjudicatorArtifact.abi,
-      this.ethWallet
+      ContractArtifacts.NitroAdjudicatorArtifact.abi
+    );
+
+    this.nitroAdjudicator.on(ChallengeRegistered, (...args) => {
+      const event = getChallengeRegisteredEvent(args);
+      this.addFinalizingChannel({channelId: event.channelId, finalizesAtS: event.finalizesAt});
+    });
+
+    this.provider.on('block', async (blockTag: providers.BlockTag) =>
+      this.checkFinalizingChannels(await this.provider.getBlock(blockTag))
     );
   }
 
   // Only used for unit tests
-  async destructor(): Promise<void> {
+  destructor(): void {
     this.provider.removeAllListeners();
-    this.provider.polling = false;
     this.addressToContract.forEach(contract => contract.removeAllListeners());
   }
 
@@ -125,16 +145,6 @@ export class ChainService implements ChainServiceInterface {
     );
   }
 
-  private getOrAddContractObservable(assetHolderAddress: Address): Observable<ContractEvent> {
-    let obs = this.addressToObservable.get(assetHolderAddress);
-    if (!obs) {
-      const contract = this.getOrAddContractMapping(assetHolderAddress);
-      obs = this.addContractObservable(contract);
-      this.addressToObservable.set(assetHolderAddress, obs);
-    }
-    return obs;
-  }
-
   private async sendTransaction(
     transactionRequest: providers.TransactionRequest
   ): Promise<providers.TransactionResponse> {
@@ -152,7 +162,7 @@ export class ChainService implements ChainServiceInterface {
   }
 
   async fundChannel(arg: FundChannelArg): Promise<providers.TransactionResponse> {
-    this.logger.info({...arg}, 'Attempting to fund channel');
+    this.logger.info({...arg}, 'fundChannel: entry');
 
     const assetHolderAddress = arg.assetHolderAddress;
     const isEthFunding = isEthAssetHolder(assetHolderAddress);
@@ -195,7 +205,7 @@ export class ChainService implements ChainServiceInterface {
       participants: finalizationProof[0].participants.map(p => p.signingAddress),
     });
 
-    this.logger.info({channelId}, 'Attempting to conclude and withdraw funds from channel');
+    this.logger.info({channelId}, 'concludeAndWithdraw: entry');
 
     const transactionRequest = {
       ...Transactions.createConcludePushOutcomeAndTransferAllTransaction(
@@ -216,7 +226,7 @@ export class ChainService implements ChainServiceInterface {
       const [, finalizesAt] = await this.nitroAdjudicator.getChannelStorage(channelId);
 
       const {timestamp: latestBlockTimestamp} = await this.provider.getBlock(
-        await this.provider.getBlockNumber()
+        this.provider.getBlockNumber()
       );
 
       // Check if the channel has been finalized in the past
@@ -245,120 +255,236 @@ export class ChainService implements ChainServiceInterface {
     return transactionResponse;
   }
 
+  async challenge(
+    challengeStates: SignedState[],
+    privateKey: PrivateKey
+  ): Promise<providers.TransactionResponse> {
+    this.logger.info({challengeStates}, 'challenge: entry');
+    if (!challengeStates.length) {
+      throw new Error('Must challenge with at least one state');
+    }
+
+    const challengeTransactionRequest = {
+      ...Transactions.createChallengeTransaction(
+        challengeStates.flatMap(toNitroSignedState),
+        privateKey
+      ),
+      to: nitroAdjudicatorAddress,
+    };
+    return this.sendTransaction(challengeTransactionRequest);
+  }
+
+  async pushOutcomeAndWithdraw(
+    state: State,
+    challengerAddress: Address
+  ): Promise<providers.TransactionResponse> {
+    this.logger.info('pushOutcomeAndWithdraw: entry');
+    const lastState = toNitroState(state);
+    const channelId = getChannelId(lastState.channel);
+    const [
+      turnNumRecord,
+      finalizesAt,
+      _fingerprint,
+    ] = await this.nitroAdjudicator.getChannelStorage(channelId);
+
+    const pushTransactionRequest = {
+      ...Transactions.createPushOutcomeAndTransferAllTransaction({
+        turnNumRecord,
+        finalizesAt,
+        state: lastState,
+        outcome: lastState.outcome,
+        challengerAddress,
+      }),
+      to: nitroAdjudicatorAddress,
+    };
+    return this.sendTransaction(pushTransactionRequest);
+  }
+
+  // TODO add another public method for transferring from an channel that has already been concluded *and* pushed
+  // i.e. one that calls NitroAdjudicator.transfer. We could call the new method "withdraw" to match the other methods in this class
+  // The new method will uses the latest outcome that we know exists ON CHAIN, which can be "newer" than the latest OFF CHAIN outcome.
+  // Choices:
+  // - the chain service stores the latest outcome in it's own DB table
+  // - the wallet.store stores them
+  // - nothing is stored, and the chain service searches through historic transaction data that it pulls from the provider (seems riskier, but we may need to do this in case we are offline for a time, anyway)
+
   registerChannel(
     channelId: Bytes32,
     assetHolders: Address[],
     subscriber: ChainEventSubscriberInterface
   ): void {
-    this.logger.info(
-      {channelId, assetHolders},
-      'Registering channel with ChainService monitor for Deposited and AssetTransferred events'
-    );
+    this.logger.info({channelId, assetHolders}, 'registerChannel: entry');
 
-    assetHolders.map(async assetHolder => {
-      const obs = this.getOrAddContractObservable(assetHolder);
-      // Fetch the current contract holding, and emit as an event
+    this.channelToSubscribers.set(channelId, [
+      ...(this.channelToSubscribers.get(channelId) ?? []),
+      subscriber,
+    ]);
+
+    assetHolders.map(assetHolder => {
+      this.setUpAssetHolderListener(assetHolder);
       const contract = this.getOrAddContractMapping(assetHolder);
       if (!contract) throw new Error('The addressToContract mapping should contain the contract');
-      const currentHolding = from(this.getInitialHoldings(contract, channelId));
-
-      const subscription = concat<ContractEvent>(
-        currentHolding,
-        obs.pipe(filter(event => event.channelId === channelId))
-      ).subscribe({
-        next: async event => {
-          switch (event.type) {
-            case Deposited:
-              this.logger.debug(
-                {channelId, tx: event.ethersEvent?.transactionHash},
-                'Observed Deposited event on-chain; beginning to wait for confirmations'
-              );
-              await this.waitForConfirmations(event.ethersEvent);
-              subscriber.holdingUpdated(event);
-              break;
-            case AssetTransferred:
-              this.logger.debug(
-                {channelId, tx: event.ethersEvent?.transactionHash},
-                'Observed AssetTransferred event on-chain; beginning to wait for confirmations'
-              );
-              await this.waitForConfirmations(event.ethersEvent);
-              subscriber.assetTransferred(event);
-              break;
-            default:
-              throw new Error('Unexpected event from contract observable');
-          }
-        },
-      });
-      const subscriptions = this.channelToSubscription.get(channelId) ?? [];
-      this.channelToSubscription.set(channelId, [...subscriptions, subscription]);
-    });
-  }
-
-  /** Implementation note:
-   *  The following is a simplified API that assumes a single registerChannel call per channel.
-   *  If we would like to allow for multiple registrations per channel, registerChannel should return a registration ID.
-   *  unregisterChannel will require the registration ID as a parameter.
-   */
-  unregisterChannel(channelId: Bytes32): void {
-    const subscriptions = this.channelToSubscription.get(channelId);
-    if (subscriptions?.length !== 1) {
-      throw new Error(
-        'Unregister channel implementation only works when there is one subscriber per channel'
+      // Fetch the current contract holding, and emit as an event
+      this.getInitialHoldings(contract, channelId).then(initialHoldings =>
+        subscriber.holdingUpdated(initialHoldings)
       );
-    }
-    subscriptions.map(s => s.unsubscribe());
+    });
+
+    // This method is async so it will continue to run after the method has been exited
+    // That's ok since we're just registering some things and/or dispatching some events
+    this.registerFinalizationStatus(channelId);
   }
 
-  private async getInitialHoldings(contract: Contract, channelId: string): Promise<DepositedEvent> {
+  unregisterChannel(channelId: Bytes32): void {
+    this.logger.info({channelId}, 'unregisterChannel: entry');
+    this.channelToSubscribers.set(channelId, []);
+  }
+
+  private async checkFinalizingChannels(block: providers.Block): Promise<void> {
+    const finalizingChannel = this.finalizingChannels.shift();
+    if (!finalizingChannel) return;
+
+    if (finalizingChannel.finalizesAtS <= block.timestamp) {
+      const {channelId} = finalizingChannel;
+      const [, finalizesAt] = await this.nitroAdjudicator.getChannelStorage(channelId);
+      if (finalizesAt === finalizingChannel.finalizesAtS) {
+        // Should we wait for 6 blocks before emitting the finalized event?
+        // Will the wallet sign new states or deposit into the channel based on this event?
+        // The answer is likely no.
+        // So we probably want to emit this event as soon as possible.
+        this.channelToSubscribers.get(channelId)?.map(subscriber =>
+          subscriber.channelFinalized({
+            channelId,
+          })
+        );
+        // Chain storage has a new finalizesAt timestamp
+      } else if (finalizesAt) {
+        this.addFinalizingChannel({channelId, finalizesAtS: finalizesAt});
+      }
+      this.checkFinalizingChannels(block);
+    }
+    this.addFinalizingChannel(finalizingChannel);
+  }
+
+  private addFinalizingChannel(arg: {channelId: string; finalizesAtS: number}) {
+    const {channelId, finalizesAtS} = arg;
+    // Only add the finalizing channel if its not already there
+    if (!this.finalizingChannels.some(c => c.channelId === channelId)) {
+      this.finalizingChannels = [
+        ...this.finalizingChannels,
+        {channelId, finalizesAtS: finalizesAtS},
+      ];
+      this.finalizingChannels.sort((a, b) => a.finalizesAtS - b.finalizesAtS);
+    }
+  }
+
+  private async registerFinalizationStatus(channelId: string): Promise<void> {
+    const finalizesAtS = await this.getFinalizedAt(channelId);
+    if (finalizesAtS !== 0) {
+      this.addFinalizingChannel({channelId, finalizesAtS});
+    }
+  }
+
+  private async getFinalizedAt(channelId: string): Promise<number> {
+    const [, finalizesAt] = await this.nitroAdjudicator.getChannelStorage(channelId);
+    return finalizesAt;
+  }
+
+  private async getInitialHoldings(
+    contract: Contract,
+    channelId: string
+  ): Promise<HoldingUpdatedArg> {
     const holding = BN.from(await contract.holdings(channelId));
 
     return {
-      type: Deposited,
       channelId,
       assetHolderAddress: makeAddress(contract.address),
       amount: BN.from(holding),
     };
   }
 
-  private async waitForConfirmations(event: Event | undefined): Promise<void> {
-    if (event) {
-      // `tx.wait(n)` resolves after n blocks are mined that include the given transaction `tx`
-      // See https://docs.ethers.io/v5/api/providers/types/#providers-TransactionResponse
-      await (await event.getTransaction()).wait(this.blockConfirmations + 1);
-      this.logger.debug(
-        {tx: event.transactionHash},
-        'Finished waiting for confirmations; considering transaction finalized'
-      );
-      return;
+  private async waitForConfirmations(event: Event): Promise<void> {
+    // `tx.wait(n)` resolves after n blocks are mined that include the given transaction `tx`
+    // See https://docs.ethers.io/v5/api/providers/types/#providers-TransactionResponse
+    await (await event.getTransaction()).wait(this.blockConfirmations + 1);
+    this.logger.debug(
+      {tx: event.transactionHash},
+      'Finished waiting for confirmations; considering transaction finalized'
+    );
+  }
+
+  private setUpAssetHolderListener(assetHolderAddress: Address): void {
+    if (!this.assetHolderToObservable.get(assetHolderAddress)) {
+      const contract = this.getOrAddContractMapping(assetHolderAddress);
+      const obs = this.addAssetHolderObservable(contract);
+      this.assetHolderToObservable.set(assetHolderAddress, obs);
     }
   }
 
-  private addContractObservable(contract: Contract): Observable<ContractEvent> {
+  private addAssetHolderObservable(assetHolderContract: Contract): Observable<AssetHolderEvent> {
     // Create an observable that emits events on contract events
-    const obs = new Observable<ContractEvent>(subs => {
+    const obs = new Observable<AssetHolderEvent>(subs => {
       // TODO: add other event types
-      contract.on(Deposited, (destination, _amountDeposited, destinationHoldings, event) =>
-        subs.next({
-          type: Deposited,
-          channelId: destination,
-          assetHolderAddress: makeAddress(contract.address),
-          amount: BN.from(destinationHoldings),
-          ethersEvent: event,
-        })
+      assetHolderContract.on(
+        Deposited,
+        (destination, _amountDeposited, destinationHoldings, event) =>
+          subs.next({
+            type: Deposited,
+            channelId: destination,
+            assetHolderAddress: makeAddress(assetHolderContract.address),
+            amount: BN.from(destinationHoldings),
+            ethersEvent: event,
+          })
       );
-      contract.on(AssetTransferred, (channelId, destination, payoutAmount, event) =>
-        subs.next({
-          type: AssetTransferred,
+      assetHolderContract.on(AllocationUpdated, async (channelId, initialHoldings, event) => {
+        const tx = await this.provider.getTransaction(event.transactionHash);
+        const {
+          newAssetOutcome,
+          newHoldings,
+          externalPayouts,
+          internalPayouts,
+        } = computeNewAssetOutcome(
+          assetHolderContract.address,
+          nitroAdjudicatorAddress,
+          {channelId, initialHoldings},
+          tx
+        );
+
+        return subs.next({
+          type: AllocationUpdated,
           channelId,
-          assetHolderAddress: makeAddress(contract.address),
-          to: makeDestination(destination),
-          amount: BN.from(payoutAmount),
+          assetHolderAddress: makeAddress(assetHolderContract.address),
+          newAssetOutcome,
+          externalPayouts,
+          internalPayouts,
+          newHoldings: BN.from(newHoldings),
           ethersEvent: event,
-        })
-      );
+        });
+      });
+    });
+    obs.subscribe({
+      next: async event => {
+        this.logger.debug(
+          {channelId: event.channelId, tx: event.ethersEvent?.transactionHash},
+          `Observed ${event.type} event on-chain; beginning to wait for confirmations`
+        );
+        await this.waitForConfirmations(event.ethersEvent);
+        this.channelToSubscribers.get(event.channelId)?.forEach(subscriber => {
+          switch (event.type) {
+            case Deposited:
+              subscriber.holdingUpdated(event);
+              break;
+            case AllocationUpdated:
+              subscriber.assetOutcomeUpdated(event);
+              break;
+            default:
+              throw new Error('Unexpected event from contract observable');
+          }
+        });
+      },
     });
 
-    return obs.pipe(share());
+    return obs;
   }
 
   private async increaseAllowance(assetHolderAddress: Address, amount: string): Promise<void> {
@@ -422,7 +548,7 @@ export class ChainService implements ChainServiceInterface {
    *
    * @param appDefinition Address of state channels app
    *
-   * Rejects with 'Bytecode missint' if there is no contract deployed at `appDefinition`.
+   * Rejects with 'Bytecode missing' if there is no contract deployed at `appDefinition`.
    */
   public async fetchBytecode(appDefinition: string): Promise<string> {
     const result = await this.provider.getCode(appDefinition);

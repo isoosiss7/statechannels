@@ -34,6 +34,7 @@ contract AssetHolder is IAssetHolder {
         uint256[] memory indices
     ) external override {
         // checks
+        _requireIncreasingIndices(indices);
         _requireCorrectAllocationHash(fromChannelId, allocationBytes);
         // effects and interactions
         _transfer(fromChannelId, allocationBytes, indices);
@@ -99,7 +100,7 @@ contract AssetHolder is IAssetHolder {
     // **************
 
     modifier AdjudicatorOnly {
-        require(msg.sender == AdjudicatorAddress, 'Only the NitroAdjudicator is authorized');
+        require(msg.sender == AdjudicatorAddress, 'Only NitroAdjudicator authorized');
         _;
     }
 
@@ -129,10 +130,8 @@ contract AssetHolder is IAssetHolder {
     function setAssetOutcomeHash(bytes32 channelId, bytes32 assetOutcomeHash)
         external
         AdjudicatorOnly
-        returns (bool success)
     {
         _setAssetOutcomeHash(channelId, assetOutcomeHash);
-        return true;
     }
 
     // **************
@@ -207,7 +206,7 @@ contract AssetHolder is IAssetHolder {
         Outcome.AllocationItem[] memory allocation,
         uint256[] memory indices
     )
-        internal
+        public
         pure
         returns (
             Outcome.AllocationItem[] memory newAllocation,
@@ -216,21 +215,21 @@ contract AssetHolder is IAssetHolder {
             uint256 totalPayouts
         )
     {
-        payouts = new uint256[](indices.length > 0 ? indices.length : allocation.length); // [] means "all"; values default to 0
+        // `indices == []` means "pay out to all"
+        // Note: by initializing payouts to be an array of fixed length, its entries are initialized to be `0`
+        payouts = new uint256[](indices.length > 0 ? indices.length : allocation.length);
         totalPayouts = 0;
         newAllocation = new Outcome.AllocationItem[](allocation.length);
-        safeToDelete = true; // switched to false if there is an item with amount > 0
+        safeToDelete = true; // switched to false if there is an item remaining with amount > 0
         uint256 surplus = initialHoldings; // virtual funds available during calculation
-        uint256 k = 0; // indexes indices
+        uint256 k = 0; // indexes the `indices` array
 
         // loop over allocations and decrease surplus
         for (uint256 i = 0; i < allocation.length; i++) {
             // copy destination part
             newAllocation[i].destination = allocation[i].destination;
             // compute new amount part
-            uint256 affordsForDestination = (allocation[i].amount > surplus)
-                ? surplus
-                : allocation[i].amount; // min(amount,surplus)
+            uint256 affordsForDestination = min(allocation[i].amount, surplus);
             if ((indices.length == 0) || ((k < indices.length) && (indices[k] == i))) {
                 // found a match
                 // reduce the current allocationItem.amount
@@ -278,13 +277,7 @@ contract AssetHolder is IAssetHolder {
         // EFFECTS
         // *******
 
-        uint256 newHoldings = initialHoldings.sub(totalPayouts);
-
-        if (newHoldings == 0) {
-            delete holdings[fromChannelId];
-        } else {
-            holdings[fromChannelId] = newHoldings;
-        }
+        holdings[fromChannelId] = initialHoldings.sub(totalPayouts); // expect gas rebate if this is set to 0
 
         if (safeToDelete) {
             delete assetOutcomeHashes[fromChannelId];
@@ -316,6 +309,7 @@ contract AssetHolder is IAssetHolder {
                 emit AssetTransferred(fromChannelId, destination, payouts[j]);
             }
         }
+        emit AllocationUpdated(fromChannelId, initialHoldings);
     }
 
     /**
@@ -377,10 +371,9 @@ contract AssetHolder is IAssetHolder {
                 } else {
                     holdings[destination] += payouts[j];
                 }
-                // Event emitted
-                emit AssetTransferred(guarantorChannelId, destination, payouts[j]);
             }
         }
+        emit AllocationUpdated(guarantorChannelId, initialHoldings);
     }
 
     /**
@@ -400,7 +393,7 @@ contract AssetHolder is IAssetHolder {
      * @param destination ethereum address to be credited.
      * @param amount Quantity of assets to be transferred.
      */
-    function _transferAsset(address payable destination, uint256 amount) internal virtual {}
+    function _transferAsset(address payable destination, uint256 amount) internal virtual {} // solhint-disable-line no-empty-blocks
 
     /**
      * @notice Checks if a given destination is external (and can therefore have assets transferred to it) or not.
@@ -470,5 +463,15 @@ contract AssetHolder is IAssetHolder {
                 ),
             'AssetHolder | submitted guaranteeBytes data does not match stored assetOutcomeHash'
         );
+    }
+
+    function _requireIncreasingIndices(uint256[] memory indices) internal pure {
+        for (uint256 i = 0; i < indices.length - 1; i++) {
+            require(indices[i] < indices[i + 1], 'Indices must be sorted');
+        }
+    }
+
+    function min(uint256 a, uint256 b) internal pure returns (uint256) {
+        return a > b ? b : a;
     }
 }

@@ -1,6 +1,7 @@
 import {checkThat, isSimpleAllocation, State, unreachable} from '@statechannels/wallet-core';
 import {Transaction} from 'knex';
 import {Logger} from 'pino';
+import {isExternalDestination} from '@statechannels/nitro-protocol';
 
 import {Store} from '../wallet/store';
 import {Bytes32} from '../type-aliases';
@@ -148,7 +149,7 @@ export const protocol = (ps: ProtocolState): CloseChannelProtocolResult =>
   chainWithdraw(ps) ||
   completeCloseChannel(ps) ||
   defundIntoLedger(ps) ||
-  signFinalState(ps) ||
+  (ensureAllAllocationItemsAreExternalDestinations(ps) && signFinalState(ps)) ||
   noAction;
 
 export type ProtocolState = {
@@ -215,6 +216,17 @@ const defundIntoLedger = (ps: ProtocolState): RequestLedgerDefunding | false =>
     channelId: ps.app.channelId,
     assetHolderAddress: checkThat(ps.app.latest.outcome, isSimpleAllocation).assetHolderAddress,
   });
+
+/**
+ * Ensure none of its allocation items are other channels being funded by this channel
+ * (e.g., if it is a ledger channel). This should cause the protocol to "pause" / "freeze"
+ * until no channel depends on this channel for funding.
+ */
+const ensureAllAllocationItemsAreExternalDestinations = (ps: ProtocolState): boolean =>
+  !!ps.app.supported &&
+  checkThat(ps.app.supported.outcome, isSimpleAllocation).allocationItems.every(({destination}) =>
+    isExternalDestination(destination)
+  );
 
 const isLedgerFunded = ({fundingStrategy}: ChannelState): boolean => fundingStrategy === 'Ledger';
 

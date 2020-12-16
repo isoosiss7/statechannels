@@ -4,7 +4,6 @@ import {
   SyncChannelParams,
   JoinChannelParams,
   CloseChannelParams,
-  ChannelResult,
   GetStateParams,
   Participant as APIParticipant,
   ChannelId,
@@ -19,6 +18,7 @@ import {
   makeAddress,
   Address as CoreAddress,
   PrivateKey,
+  makeDestination,
 } from '@statechannels/wallet-core';
 import * as Either from 'fp-ts/lib/Either';
 import Knex from 'knex';
@@ -29,8 +29,7 @@ import {Logger} from 'pino';
 import {Payload as WirePayload} from '@statechannels/wire-format';
 import {ValidationErrorItem} from 'joi';
 
-import {Bytes32, Uint256} from '../type-aliases';
-import {Outgoing} from '../protocols/actions';
+import {Bytes32} from '../type-aliases';
 import {createLogger} from '../logger';
 import * as ProcessLedgerQueue from '../protocols/process-ledger-queue';
 import * as UpdateChannel from '../handlers/update-channel';
@@ -38,7 +37,6 @@ import * as JoinChannel from '../handlers/join-channel';
 import * as ChannelState from '../protocols/state';
 import {isWalletError, PushMessageError} from '../errors/wallet-error';
 import {timerFactory, recordFunctionMetrics, setupMetrics} from '../metrics';
-import {mergeChannelResults, mergeOutgoing} from '../utilities/messaging';
 import {
   ServerWalletConfig,
   extractDBConfigFromServerWalletConfig,
@@ -50,9 +48,10 @@ import {
   ChainServiceInterface,
   ChainEventSubscriberInterface,
   HoldingUpdatedArg,
-  AssetTransferredArg,
   ChainService,
   MockChainService,
+  ChannelFinalizedArg,
+  AssetOutcomeUpdatedArg,
 } from '../chain-service';
 import {DBAdmin} from '../db-admin/db-admin';
 import {WALLET_VERSION} from '../version';
@@ -61,41 +60,23 @@ import {Channel} from '../models/channel';
 import {SingleAppUpdater} from '../handlers/single-app-updater';
 
 import {Store, AppHandler, MissingAppHandler} from './store';
-import {WalletInterface} from './types';
+import {
+  SingleChannelOutput,
+  MultipleChannelOutput,
+  Output,
+  WalletInterface,
+  UpdateChannelFundingParams,
+  WalletEvent,
+} from './types';
 import {WalletResponse} from './wallet-response';
 
 // TODO: The client-api does not currently allow for outgoing messages to be
 // declared as the result of a wallet API call.
 // Nor does it allow for multiple channel results
-export type SingleChannelOutput = {
-  outbox: Outgoing[];
-  channelResult: ChannelResult;
-};
-export type MultipleChannelOutput = {
-  outbox: Outgoing[];
-  channelResults: ChannelResult[];
-};
-export type Message = SingleChannelOutput | MultipleChannelOutput;
 
-type ChannelUpdatedEventName = 'channelUpdated';
-type ChannelUpdatedEvent = {
-  type: ChannelUpdatedEventName;
-  value: SingleChannelOutput;
-};
-
-export type WalletEvent = ChannelUpdatedEvent;
 type EventEmitterType = {
-  [key in ChannelUpdatedEvent['type']]: ChannelUpdatedEvent['value'];
+  [key in WalletEvent['type']]: WalletEvent['value'];
 };
-
-const isSingleChannelMessage = (message: Message): message is SingleChannelOutput =>
-  'channelResult' in message;
-
-export interface UpdateChannelFundingParams {
-  channelId: ChannelId;
-  assetHolderAddress?: CoreAddress;
-  amount: Uint256;
-}
 
 export class ConfigValidationError extends Error {
   constructor(public errors: ValidationErrorItem[]) {
@@ -187,15 +168,8 @@ export class SingleThreadedWallet extends EventEmitter<EventEmitterType>
     );
   }
 
-  public mergeMessages(messages: Message[]): MultipleChannelOutput {
-    const channelResults = mergeChannelResults(
-      messages
-        .map(m => (isSingleChannelMessage(m) ? [m.channelResult] : m.channelResults))
-        .reduce((cr1, cr2) => cr1.concat(cr2))
-    );
-
-    const outbox = mergeOutgoing(messages.map(m => m.outbox).reduce((m1, m2) => m1.concat(m2)));
-    return {channelResults, outbox};
+  public mergeMessages(output: Output[]): MultipleChannelOutput {
+    return WalletResponse.mergeOutputs(output);
   }
 
   public async destroy(): Promise<void> {
@@ -277,7 +251,7 @@ export class SingleThreadedWallet extends EventEmitter<EventEmitterType>
   }
 
   async createLedgerChannel(
-    args: Pick<CreateChannelParams, 'participants' | 'allocations'>,
+    args: Pick<CreateChannelParams, 'participants' | 'allocations' | 'challengeDuration'>,
     fundingStrategy: 'Direct' | 'Fake' = 'Direct'
   ): Promise<SingleChannelOutput> {
     const response = WalletResponse.initialize();
@@ -329,6 +303,7 @@ export class SingleThreadedWallet extends EventEmitter<EventEmitterType>
       allocations,
       fundingStrategy,
       fundingLedgerChannelId,
+      challengeDuration,
     } = args;
 
     const participants = serializedParticipants.map(convertToParticipant);
@@ -339,7 +314,7 @@ export class SingleThreadedWallet extends EventEmitter<EventEmitterType>
     const constants = {
       appDefinition: makeAddress(appDefinition),
       chainId: BigNumber.from(this.walletConfig.networkConfiguration.chainNetworkID).toHexString(),
-      challengeDuration: 9001,
+      challengeDuration,
       channelNonce,
       participants,
     };
@@ -687,18 +662,34 @@ export class SingleThreadedWallet extends EventEmitter<EventEmitterType>
     response.channelUpdatedEvents().forEach(event => this.emit('channelUpdated', event.value));
   }
 
-  async assetTransferred(arg: AssetTransferredArg): Promise<void> {
+  async assetOutcomeUpdated({
+    channelId,
+    assetHolderAddress,
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    newAssetOutcome, // TODO currently unused
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    newHoldings, // TODO currently unused
+    externalPayouts,
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    internalPayouts, // TODO currently unused
+  }: AssetOutcomeUpdatedArg): Promise<void> {
     const response = WalletResponse.initialize();
-    // TODO: make sure that arg.to is checksummed
-    await this.store.updateTransferredOut(
-      arg.channelId,
-      arg.assetHolderAddress,
-      arg.to,
-      arg.amount
-    );
-    await this.takeActions([arg.channelId], response);
+    externalPayouts.forEach(async payout => {
+      await this.store.updateTransferredOut(
+        channelId,
+        assetHolderAddress,
+        makeDestination(payout.destination),
+        payout.amount
+      );
+    });
+
+    await this.takeActions([channelId], response);
 
     response.channelUpdatedEvents().forEach(event => this.emit('channelUpdated', event.value));
+  }
+
+  async channelFinalized(_arg: ChannelFinalizedArg): Promise<void> {
+    return;
   }
 
   private async registerChannelWithChainService(channelId: string): Promise<void> {

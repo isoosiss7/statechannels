@@ -1,3 +1,4 @@
+import {FundingStrategy} from '@statechannels/client-api-schema';
 import {
   Address,
   BN,
@@ -17,17 +18,26 @@ import {
 import {ETH_ASSET_HOLDER_ADDRESS} from '@statechannels/wallet-core/lib/src/config';
 import {SignedState as WireState, Payload} from '@statechannels/wire-format';
 
+import {DBOpenChannelObjective} from '../../../models/objective';
 import {SigningWallet} from '../../../models/signing-wallet';
 import {WALLET_VERSION} from '../../../version';
+import {Store} from '../../store';
 
 import {alice, bob} from './participants';
 import {alice as aliceWallet, bob as bobWallet} from './signing-wallets';
 import {stateWithHashSignedBy} from './states';
 
+/**
+ * Arguments for constructing a TestChannel
+ *
+ * @param finalFrom - a turnnumber where the channel bceoms finalized. All subsequent states willl be final and have this turn number
+ */
 interface TestChannelArgs {
   aBal?: number;
   bBal?: number;
   channelNonce?: number;
+  finalFrom?: number;
+  fundingStrategy?: FundingStrategy;
 }
 
 /** A two-party channel between Alice and Bob, with state history. For testing purposes. */
@@ -39,6 +49,8 @@ export class TestChannel {
   public signingWalletB: SigningWallet = bobWallet();
   public startBals: [number, number];
   public channelNonce: number;
+  public finalFrom?: number;
+  public fundingStrategy: FundingStrategy;
 
   public get participants(): Participant[] {
     return [this.participantA, this.participantB];
@@ -52,9 +64,10 @@ export class TestChannel {
   }
 
   protected constructor(args: TestChannelArgs) {
-    const {aBal, bBal, channelNonce} = {aBal: 5, bBal: 5, channelNonce: 5, ...args};
-    this.startBals = [aBal, bBal];
-    this.channelNonce = channelNonce;
+    this.fundingStrategy = args.fundingStrategy || 'Direct';
+    this.startBals = [args.aBal || 5, args.bBal || 5];
+    this.channelNonce = args.channelNonce || 5;
+    this.finalFrom = args.finalFrom;
   }
 
   /**
@@ -65,31 +78,32 @@ export class TestChannel {
    * Note - in cases where participants double-sign the same states, n might _not_
    * be the turnNum
    */
-  public state(n: number, bals?: [number, number], final = ''): State {
+  public state(n: number, bals?: [number, number]): State {
     return {
       ...this.channelConstants,
       appData: '0x',
-      isFinal: final === 'final',
-      turnNum: n,
+      isFinal: !!this.finalFrom && n >= this.finalFrom,
+      // test channels adopt a countersigning strategy for final states, so the turn number doesn't progress after finalFrom.
+      turnNum: Math.min(n, this.finalFrom || n),
       outcome: bals ? this.toOutcome(bals) : this.startOutcome,
     };
   }
 
-  public signedStateWithHash(n: number, bals?: [number, number], final = ''): SignedStateWithHash {
-    return stateWithHashSignedBy([this.signingWallets[n % 2]])(this.state(n, bals, final));
+  public signedStateWithHash(n: number, bals?: [number, number]): SignedStateWithHash {
+    return stateWithHashSignedBy([this.signingWallets[n % 2]])(this.state(n, bals));
   }
 
   /**
    * Gives the nth state in the history, signed by the correct participant
    */
-  public wireState(n: number, bals?: [number, number], final = ''): WireState {
-    return serializeState(this.signedStateWithHash(n, bals, final));
+  public wireState(n: number, bals?: [number, number]): WireState {
+    return serializeState(this.signedStateWithHash(n, bals));
   }
 
-  public wirePayload(n: number, bals?: [number, number], final = ''): Payload {
+  public wirePayload(n: number, bals?: [number, number]): Payload {
     return {
       walletVersion: WALLET_VERSION,
-      signedStates: [this.wireState(n, bals, final)],
+      signedStates: [this.wireState(n, bals)],
     };
   }
 
@@ -136,7 +150,18 @@ export class TestChannel {
       type: 'OpenChannel',
       data: {
         targetChannelId: this.channelId,
-        fundingStrategy: 'Direct',
+        fundingStrategy: this.fundingStrategy,
+      },
+    };
+  }
+
+  public get closeChannelObjective(): Objective {
+    return {
+      participants: this.participants,
+      type: 'CloseChannel',
+      data: {
+        targetChannelId: this.channelId,
+        fundingStrategy: this.fundingStrategy,
       },
     };
   }
@@ -172,6 +197,50 @@ export class TestChannel {
   static get emptyPayload(): Payload {
     return {walletVersion: WALLET_VERSION};
   }
+
+  public get startBal(): number {
+    return this.startBals.reduce((s, n) => s + n);
+  }
+
+  /**
+   * Calls addSigningKey, pushMessage, updateFunding, ensureObjective and approveObjective on the supplied store.
+   */
+  public async insertInto(store: Store, args: InsertionParams): Promise<DBOpenChannelObjective> {
+    const {states, participant} = args;
+
+    // load the signingKey for the appopriate participant
+    await store.addSigningKey(this.signingKeys[participant]);
+
+    // load in the states
+    for (const stateNum of states) {
+      await store.pushMessage(this.wirePayload(Number(stateNum)));
+    }
+
+    // if no funds are passed in, fully fund the channel iff we're into post fund setup
+    const funds =
+      args.funds !== undefined ? args.funds : Math.max(...states) > 1 ? this.startBal : 0;
+
+    // set the funds as specified
+    if (funds > 0) {
+      await store.updateFunding(this.channelId, BN.from(funds), this.assetHolderAddress);
+    }
+
+    const objective = await store.transaction(async tx => {
+      // need to do this to set the funding type
+      const o = await store.ensureObjective(this.openChannelObjective, tx);
+      await store.approveObjective(o.objectiveId, tx);
+
+      return o as DBOpenChannelObjective;
+    });
+
+    return objective;
+  }
+}
+
+interface InsertionParams {
+  participant: 0 | 1;
+  states: number[];
+  funds?: number;
 }
 
 function combineArrays<T>(a1: T[] | undefined, a2: T[] | undefined): T[] | undefined {

@@ -92,7 +92,8 @@ contract ForceMove is IForceMove {
         emit ChallengeRegistered(
             channelId,
             largestTurnNum,
-            uint48(block.timestamp) + fixedPart.challengeDuration, // This could overflow, so don't join a channel with a huge challengeDuration
+            uint48(block.timestamp) + fixedPart.challengeDuration, //solhint-disable-line not-rely-on-time
+            // This could overflow, so don't join a channel with a huge challengeDuration
             challenger,
             isFinalCount > 0,
             fixedPart,
@@ -104,7 +105,7 @@ contract ForceMove is IForceMove {
         channelStorageHashes[channelId] = _hashChannelData(
             ChannelData(
                 largestTurnNum,
-                uint48(block.timestamp) + fixedPart.challengeDuration,
+                uint48(block.timestamp) + fixedPart.challengeDuration, //solhint-disable-line not-rely-on-time
                 supportedStateHash,
                 challenger,
                 keccak256(variableParts[variableParts.length - 1].outcome)
@@ -334,9 +335,9 @@ contract ForceMove is IForceMove {
 
         // effects
         channelStorageHashes[channelId] = _hashChannelData(
-            ChannelData(0, uint48(block.timestamp), bytes32(0), address(0), outcomeHash)
+            ChannelData(0, uint48(block.timestamp), bytes32(0), address(0), outcomeHash) //solhint-disable-line not-rely-on-time
         );
-        emit Concluded(channelId, uint48(block.timestamp));
+        emit Concluded(channelId, uint48(block.timestamp)); //solhint-disable-line not-rely-on-time
     }
 
     // Internal methods:
@@ -443,8 +444,6 @@ contract ForceMove is IForceMove {
         return true;
     }
 
-    bytes constant prefix = '\x19Ethereum Signed Message:\n32';
-
     /**
      * @notice Given a digest and ethereum digital signature, recover the signer
      * @dev Given a digest and digital signature, recover the signer
@@ -453,7 +452,7 @@ contract ForceMove is IForceMove {
      * @return signer
      */
     function _recoverSigner(bytes32 _d, Signature memory sig) internal pure returns (address) {
-        bytes32 prefixedHash = keccak256(abi.encodePacked(prefix, _d));
+        bytes32 prefixedHash = keccak256(abi.encodePacked('\x19Ethereum Signed Message:\n32', _d));
         address a = ecrecover(prefixedHash, sig.v, sig.r, sig.s);
         require(a != address(0), 'Invalid signature');
         return (a);
@@ -548,6 +547,8 @@ contract ForceMove is IForceMove {
         return stateHashes;
     }
 
+    enum IsValidTransition {True, NeedToCheckApp}
+
     /**
     * @notice Check that the submitted pair of states form a valid transition
     * @dev Check that the submitted pair of states form a valid transition
@@ -555,18 +556,16 @@ contract ForceMove is IForceMove {
     transition
     * @param isFinalAB Pair of booleans denoting whether the first and second state (resp.) are final.
     * @param ab Variable parts of each of the pair of states
-    * @param turnNumB turnNum of the later state of the pair.
-    * @param appDefinition Address of deployed contract containing application-specific validTransition function.
+    * @param turnNumB turnNum of the later state of the pair
     * @return true if the later state is a validTransition from its predecessor, false otherwise.
     */
-    function _requireValidTransition(
+    function _requireValidProtocolTransition(
         uint256 nParticipants,
         bool[2] memory isFinalAB, // [a.isFinal, b.isFinal]
         IForceMoveApp.VariablePart[2] memory ab, // [a,b]
-        uint48 turnNumB,
-        address appDefinition
-    ) internal pure returns (bool) {
-        // a prior check on the signatures for the submitted states implies that the following fields are equal for a and b:
+        uint48 turnNumB
+    ) internal pure returns (IsValidTransition) {
+        // a separate check on the signatures for the submitted states implies that the following fields are equal for a and b:
         // chainId, participants, channelNonce, appDefinition, challengeDuration
         // and that the b.turnNum = a.turnNum + 1
         if (isFinalAB[1]) {
@@ -589,17 +588,44 @@ contract ForceMove is IForceMove {
                     'InvalidTransitionError: Cannot change the appData during setup phase'
                 );
             } else {
-                require(
-                    IForceMoveApp(appDefinition).validTransition(
-                        ab[0],
-                        ab[1],
-                        turnNumB,
-                        nParticipants
-                    )
-                );
-                // reason string not necessary (called function will provide reason for reverting)
+                return IsValidTransition.NeedToCheckApp;
             }
         }
+        return IsValidTransition.True;
+    }
+
+    /**
+    * @notice Check that the submitted pair of states form a valid transition
+    * @dev Check that the submitted pair of states form a valid transition
+    * @param nParticipants Number of participants in the channel.
+    transition
+    * @param isFinalAB Pair of booleans denoting whether the first and second state (resp.) are final.
+    * @param ab Variable parts of each of the pair of states
+    * @param turnNumB turnNum of the later state of the pair.
+    * @param appDefinition Address of deployed contract containing application-specific validTransition function.
+    * @return true if the later state is a validTransition from its predecessor, false otherwise.
+    */
+    function _requireValidTransition(
+        uint256 nParticipants,
+        bool[2] memory isFinalAB, // [a.isFinal, b.isFinal]
+        IForceMoveApp.VariablePart[2] memory ab, // [a,b]
+        uint48 turnNumB,
+        address appDefinition
+    ) internal pure returns (bool) {
+        IsValidTransition isValidProtocolTransition = _requireValidProtocolTransition(
+            nParticipants,
+            isFinalAB, // [a.isFinal, b.isFinal]
+            ab, // [a,b]
+            turnNumB
+        );
+
+        if (isValidProtocolTransition == IsValidTransition.NeedToCheckApp) {
+            require(
+                IForceMoveApp(appDefinition).validTransition(ab[0], ab[1], turnNumB, nParticipants),
+                'Invalid ForceMoveApp Transition'
+            );
+        }
+
         return true;
     }
 
@@ -618,6 +644,7 @@ contract ForceMove is IForceMove {
         // copied from https://www.npmjs.com/package/solidity-bytes-utils/v/0.1.1
         bool success = true;
 
+        /* solhint-disable no-inline-assembly */
         assembly {
             let length := mload(_preBytes)
 
@@ -654,6 +681,7 @@ contract ForceMove is IForceMove {
                     success := 0
                 }
         }
+        /* solhint-disable no-inline-assembly */
 
         return success;
     }
@@ -768,6 +796,7 @@ contract ForceMove is IForceMove {
         (, uint48 finalizesAt, ) = _getChannelStorage(channelId);
         if (finalizesAt == 0) {
             return ChannelMode.Open;
+            // solhint-disable-next-line not-rely-on-time
         } else if (finalizesAt <= block.timestamp) {
             return ChannelMode.Finalized;
         } else {
@@ -876,9 +905,11 @@ contract ForceMove is IForceMove {
 
     function getChainID() public pure returns (uint256) {
         uint256 id;
+        /* solhint-disable no-inline-assembly */
         assembly {
             id := chainid()
         }
+        /* solhint-disable no-inline-assembly */
         return id;
     }
 
@@ -915,7 +946,7 @@ contract ForceMove is IForceMove {
         );
         require(
             (numSigs == numParticipants) && (numWhoSignedWhats == numParticipants),
-            'ForceMove | You must provide exactly one signature per participant, and assert who signed what for all participants'
+            'ForceMove | Require exactly 1 signature per participant & who signed what for all participants'
         );
         require(numParticipants < type(uint8).max, 'ForceMove | Too many participants!');
         return true;
