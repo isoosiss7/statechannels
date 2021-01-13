@@ -15,6 +15,11 @@ import {stateSignedBy} from '../../wallet/__test__/fixtures/states';
 import {Fixture} from '../../wallet/__test__/fixtures/utils';
 import {ChannelStateWithSupported} from '../state';
 import {protocol, ProtocolState} from '../ledger-manager';
+import {testKnex as knex} from '../../../jest/knex-setup-teardown';
+import {defaultTestConfig} from '../../config';
+import {TestChannel} from '../../wallet/__test__/fixtures/test-channel';
+import {Store} from '../../wallet/store';
+import {TestLedgerChannel} from '../../wallet/__test__/fixtures/test-ledger-channel';
 
 // TEST HELPERS
 // There are many test cases in this file. These helpers make the tests cases more readable.
@@ -80,7 +85,31 @@ describe('marking ledger requests as complete', () => {
     expect(protocol(processLedgerQueueProtocolState())).toBeUndefined();
   });
 
-  it('detects completed funding requests from the outcome of supported state', () => {
+  // let store: Store;
+
+  it('detects completed funding requests from the outcome of supported state', async () => {
+    const store = new Store(
+      knex,
+      defaultTestConfig().metricsConfiguration.timingMetrics,
+      defaultTestConfig().skipEvmValidation,
+      '0'
+    );
+    await store.dbAdmin().truncateDB();
+
+    // // create a normal channel
+    const appChannel = TestChannel.create({aBal: 5, bBal: 5});
+    appChannel.insertInto(store, {states: [0, 1]});
+
+    // create a ledger channel that funds that channel
+    const ledgerChannel = TestLedgerChannel.create({});
+    ledgerChannel.insertInto(store, {states: [5, 6], bals: [[appChannel.channelId, 10]]});
+
+    // create a ledger request for the ledger to fund the channel
+    // TODO: add insertRequest method to TestLedgerChannel
+    ledgerChannel.insertRequest(appChannel.channelId, 10);
+
+    // assert that it marks the request as complete
+
     const requestChannel = channel();
     const protocolArgs = {
       fundingChannel: ledgerChannelWithAllocations([requestChannel.channelId, 10]),
@@ -93,6 +122,10 @@ describe('marking ledger requests as complete', () => {
       ledgerChannelId: protocolArgs.fundingChannel.channelId,
     });
   });
+
+  // create a defund request
+  // create a ledger channel whose current state doesn't fund that channel
+  // assert that it marks the request as complete
 
   it('detects completed defunding requests from the outcome of supported state', () => {
     const requestChannel = channel();
@@ -133,6 +166,10 @@ describe('exchanging ledger proposals', () => {
       expect(protocol(processLedgerQueueProtocolState(protocolArgs))).toBeUndefined();
     });
 
+    // create a channel
+    // create a ledger request to fund that channel
+    // run the ledger manager
+    // check that there is a proposal in the outbox
     it('proposes new outcome funding 1 channel', () => {
       const requestChannel = prefundChannelWithAllocations([alice, 1]);
       const protocolArgs = {
@@ -147,6 +184,10 @@ describe('exchanging ledger proposals', () => {
       });
     });
 
+    // create 5 channels
+    // create ledger requests to fund those channels
+    // run the ledger manager
+    // check that there is a proposal that funds all those channels in the outbox
     it('proposes new outcome funding many channels', () => {
       const requestChannels = _.range(5).map(() => prefundChannelWithAllocations([alice, 1]));
       const protocolArgs = {
